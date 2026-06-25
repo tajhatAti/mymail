@@ -29,6 +29,12 @@ for i in range(1, 8):
         })
 
 # ===================== HELPER FUNCTIONS =====================
+def escape_html(text):
+    """টেলিগ্রামের HTML পার্সিং ক্র্যাশ বন্ধ করার জন্য স্পেশাল ক্যারেক্টার ফিল্টার"""
+    if not text:
+        return ""
+    return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
 def safe_decode(header_value):
     if not header_value:
         return "No Subject/Sender"
@@ -130,7 +136,7 @@ def handle_start(message):
     bot.send_message(CHAT_ID,
         f"⚡ <b>Blazing Fast Monitor Online!</b>\n\n"
         f"📧 <b>Connected Accounts ({len(ACCOUNTS)}):</b>\n{accounts_text}\n\n"
-        f"🔥 প্রতিটি অ্যাকাউন্ট এখন আলাদা থ্রেডে সমান্তরালভাবে চেক হচ্ছে।",
+        f"🔥 HTML ক্র্যাশ বাগ ফিক্স করা হয়েছে। এখন ওটিপি ইনস্ট্যান্ট আসবে।",
         parse_mode="HTML"
     )
 
@@ -165,7 +171,6 @@ def handle_delete(call):
 
 # ===================== INDIVIDUAL EMAIL WORKER THREAD =====================
 def single_account_worker(acc):
-    """প্রতিটি জিমেইল অ্যাকাউন্টের জন্য ডেডিকেটেড ফাস্ট লুপ"""
     print(f"[+] Thread started for: {acc['user']}")
     while True:
         try:
@@ -176,7 +181,7 @@ def single_account_worker(acc):
             status, messages = mail.uid('search', None, "UNSEEN")
             if status != "OK" or not messages[0]:
                 mail.logout()
-                time.sleep(3)  # কোনো নতুন মেইল না থাকলে ৩ সেকেন্ড পর আবার চেক করবে
+                time.sleep(2)
                 continue
 
             uids = messages[0].split()
@@ -190,25 +195,27 @@ def single_account_worker(acc):
                         continue
 
                     msg = email.message_from_bytes(part[1])
-                    subject = safe_decode(msg.get("Subject"))
-                    sender = safe_decode(msg.get("From"))
-                    body = get_email_body(msg)
                     
+                    # ডেটা ডিকোড করার পর HTML সেফ করা হচ্ছে যাতে টেলিগ্রাম রিজেক্ট না করে
+                    subject = escape_html(safe_decode(msg.get("Subject")))
+                    sender = escape_html(safe_decode(msg.get("From")))
+                    
+                    body = get_email_body(msg)
                     all_links = extract_all_links(msg)
                     verify_link = extract_verification_link(all_links)
                     otps = extract_otp_codes(body)
 
                     otp_section = ""
                     if otps:
-                        otp_lines = "\n".join([f"   <code>{otp}</code>  ← tap to copy" for otp in otps[:3]])
+                        otp_lines = "\n".join([f"   <code>{escape_html(otp)}</code>  ← tap to copy" for otp in otps[:3]])
                         otp_section = f"\n\n🔑 <b>OTP / Code detected:</b>\n{otp_lines}"
 
                     clean_body = re.sub(r'\s+', ' ', body).strip()
-                    preview = clean_body[:250] + "..." if len(clean_body) > 250 else clean_body
+                    preview = escape_html(clean_body[:250] + "..." if len(clean_body) > 250 else clean_body)
 
                     tg_message = (
                         f"📩 <b>New Email Alert!</b>\n"
-                        f"📧 <b>Account:</b> {acc['label']} ({acc['user']})\n"
+                        f"📧 <b>Account:</b> {escape_html(acc['label'])} ({escape_html(acc['user'])})\n"
                         f"👤 <b>From:</b> {sender}\n"
                         f"📌 <b>Subject:</b> {subject}\n\n"
                         f"💬 <b>Preview:</b>\n{preview}"
@@ -224,25 +231,26 @@ def single_account_worker(acc):
                     markup.add(types.InlineKeyboardButton("🗑️ Delete Mail", callback_data=f"del_{acc['index']}_{uid.decode()}"))
 
                     try:
+                        # মেসেজ পাঠানোর পর জিমেইল সার্ভারে Seen ফ্ল্যাগ দেওয়া হচ্ছে
                         bot.send_message(CHAT_ID, tg_message, parse_mode="HTML", reply_markup=markup)
                         mail.uid('store', uid, '+FLAGS', '\\Seen')
-                    except Exception as e:
-                        print(f"[-] Telegram Send Failed: {e}")
-
+                    except Exception as tg_err:
+                        print(f"[-] Telegram Delivery Failed: {tg_err}")
+                        # যদি টেলিগ্রাম কোনো কারণে মেসেজ নিতে না পারে, তবে মেইলটি UNSEEN ই থাকবে যাতে পরে আবার ট্রাই করা যায়
+                        
             mail.logout()
 
         except Exception as e:
             print(f"[-] Thread Error on {acc['user']}: {e}")
         
-        # একটি চক্কর শেষ করে মাত্র ৩ সেকেন্ড বিরতি নেবে (আলাদা থ্রেড হওয়ায় রেন্ডার ক্র্যাশ করবে না)
-        time.sleep(3)
+        time.sleep(2)
 
 # ===================== WEB SERVER =====================
 class WebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Fast Gmail Bot Running!")
+        self.wfile.write(b"Fast Secure Gmail Bot Running!")
     def log_message(self, *args):
         pass
 
@@ -254,12 +262,12 @@ def run_web():
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     
-    # ৭টি অ্যাকাউন্টের জন্য ৭টি আলাদা সমান্তরাল থ্রেড চালু করা
     if ACCOUNTS:
         for account in ACCOUNTS:
             threading.Thread(target=single_account_worker, args=(account,), daemon=True).start()
     else:
-        print("[-] No accounts found in Environment Variables!")
+        print("[-] No accounts configured in Render Environment Variables!")
 
-    print("[+] Parallel Fast Engine Started!")
+    print("[+] Parallel Crash-Proof Engine Started!")
     bot.infinity_polling()
+                    
