@@ -11,7 +11,7 @@ from telebot import types
 
 # ===================== CONFIGURATION =====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID", "YOUR_TELEGRAM_CHAT_ID") # সরাসরি ভেরিয়েবল থেকে সিকিউরড অ্যাক্সেস
+CHAT_ID = os.environ.get("CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -30,7 +30,6 @@ for i in range(1, 8):
 
 # ===================== HELPER FUNCTIONS =====================
 def safe_decode(header_value):
-    """ক্র্যাশ প্রোটেক্টেড হেডার ডিকোডার"""
     if not header_value:
         return "No Subject/Sender"
     try:
@@ -43,7 +42,6 @@ def safe_decode(header_value):
         return "Decoding Error"
 
 def get_email_body(msg):
-    """মেইলের বডি স্ক্র্যাপ করার নিরাপদ লজিক"""
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -60,7 +58,6 @@ def get_email_body(msg):
             elif content_type == "text/html" and not body:
                 try:
                     html = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                    # সিএসএস/স্টাইল ব্লক রিমুভ করে বডি ক্লিন করা
                     html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL)
                     body = re.sub(r'<[^>]+>', ' ', html)
                     body = re.sub(r'\s+', ' ', body).strip()
@@ -119,7 +116,6 @@ def extract_otp_codes(body):
         for match in matches:
             cleaned = re.sub(r'[\s\-]', '', match)
             if cleaned and cleaned not in otps and len(cleaned) >= 4:
-                # সিএসএস বা পিক্সেল সাইজের বড় সংখ্যা ফিল্টার করা
                 if len(cleaned) == 4 and cleaned in ['1000', '2000', '3000']: 
                     continue
                 otps.append(cleaned)
@@ -129,13 +125,12 @@ def extract_otp_codes(body):
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if str(message.chat.id) != CHAT_ID:
-        return # সম্পূর্ণ আনঅথরাইজড ইউজার ব্লক
-        
-    accounts_text = "\n".join([f"  ✅ {acc['label']}: {acc['user']}" for acc in ACCOUNTS])
+        return
+    accounts_text = "\n".join([f"  🚀 {acc['label']}: {acc['user']}" for acc in ACCOUNTS])
     bot.send_message(CHAT_ID,
-        f"✅ <b>Gmail Monitor Online!</b>\n\n"
+        f"⚡ <b>Blazing Fast Monitor Online!</b>\n\n"
         f"📧 <b>Connected Accounts ({len(ACCOUNTS)}):</b>\n{accounts_text}\n\n"
-        f"🤖 সার্ভার ২৪/৭ সচল আছে এবং ইনবক্স মনিটর করছে।",
+        f"🔥 প্রতিটি অ্যাকাউন্ট এখন আলাদা থ্রেডে সমান্তরালভাবে চেক হচ্ছে।",
         parse_mode="HTML"
     )
 
@@ -168,93 +163,86 @@ def handle_delete(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ Delete failed: {e}", show_alert=True)
 
-# ===================== EMAIL MONITOR =====================
-def monitor_loop():
-    print(f"[+] Monitoring {len(ACCOUNTS)} Gmail accounts sequentially...")
+# ===================== INDIVIDUAL EMAIL WORKER THREAD =====================
+def single_account_worker(acc):
+    """প্রতিটি জিমেইল অ্যাকাউন্টের জন্য ডেডিকেটেড ফাস্ট লুপ"""
+    print(f"[+] Thread started for: {acc['user']}")
     while True:
-        if not ACCOUNTS or not CHAT_ID:
-            time.sleep(30)
-            continue
+        try:
+            mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+            mail.login(acc["user"], acc["pass"])
+            mail.select("INBOX")
 
-        for acc in ACCOUNTS:
-            try:
-                mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-                mail.login(acc["user"], acc["pass"])
-                mail.select("INBOX")
+            status, messages = mail.uid('search', None, "UNSEEN")
+            if status != "OK" or not messages[0]:
+                mail.logout()
+                time.sleep(3)  # কোনো নতুন মেইল না থাকলে ৩ সেকেন্ড পর আবার চেক করবে
+                continue
 
-                status, messages = mail.uid('search', None, "UNSEEN")
-                if status != "OK" or not messages[0]:
-                    mail.logout()
+            uids = messages[0].split()
+            for uid in uids:
+                res, msg_data = mail.uid('fetch', uid, '(BODY.PEEK[])')
+                if res != "OK":
                     continue
 
-                uids = messages[0].split()
-                for uid in uids:
-                    res, msg_data = mail.uid('fetch', uid, '(BODY.PEEK[])')
-                    if res != "OK":
+                for part in msg_data:
+                    if not isinstance(part, tuple):
                         continue
 
-                    for part in msg_data:
-                        if not isinstance(part, tuple):
-                            continue
+                    msg = email.message_from_bytes(part[1])
+                    subject = safe_decode(msg.get("Subject"))
+                    sender = safe_decode(msg.get("From"))
+                    body = get_email_body(msg)
+                    
+                    all_links = extract_all_links(msg)
+                    verify_link = extract_verification_link(all_links)
+                    otps = extract_otp_codes(body)
 
-                        msg = email.message_from_bytes(part[1])
+                    otp_section = ""
+                    if otps:
+                        otp_lines = "\n".join([f"   <code>{otp}</code>  ← tap to copy" for otp in otps[:3]])
+                        otp_section = f"\n\n🔑 <b>OTP / Code detected:</b>\n{otp_lines}"
 
-                        # Safe Header Decoding
-                        subject = safe_decode(msg.get("Subject"))
-                        sender = safe_decode(msg.get("From"))
+                    clean_body = re.sub(r'\s+', ' ', body).strip()
+                    preview = clean_body[:250] + "..." if len(clean_body) > 250 else clean_body
 
-                        body = get_email_body(msg)
-                        all_links = extract_all_links(msg)
-                        verify_link = extract_verification_link(all_links)
-                        otps = extract_otp_codes(body)
+                    tg_message = (
+                        f"📩 <b>New Email Alert!</b>\n"
+                        f"📧 <b>Account:</b> {acc['label']} ({acc['user']})\n"
+                        f"👤 <b>From:</b> {sender}\n"
+                        f"📌 <b>Subject:</b> {subject}\n\n"
+                        f"💬 <b>Preview:</b>\n{preview}"
+                        f"{otp_section}"
+                    )
 
-                        otp_section = ""
-                        if otps:
-                            otp_lines = "\n".join([f"   <code>{otp}</code>  ← tap to copy" for otp in otps[:3]])
-                            otp_section = f"\n\n🔑 <b>OTP / Code detected:</b>\n{otp_lines}"
+                    markup = types.InlineKeyboardMarkup(row_width=2)
+                    if verify_link:
+                        markup.add(types.InlineKeyboardButton("🔗 Open Verify Link", url=verify_link))
+                    elif all_links:
+                        markup.add(types.InlineKeyboardButton("🌐 Open Main Link", url=all_links[0]))
+                    
+                    markup.add(types.InlineKeyboardButton("🗑️ Delete Mail", callback_data=f"del_{acc['index']}_{uid.decode()}"))
 
-                        clean_body = re.sub(r'\s+', ' ', body).strip()
-                        preview = clean_body[:250] + "..." if len(clean_body) > 250 else clean_body
+                    try:
+                        bot.send_message(CHAT_ID, tg_message, parse_mode="HTML", reply_markup=markup)
+                        mail.uid('store', uid, '+FLAGS', '\\Seen')
+                    except Exception as e:
+                        print(f"[-] Telegram Send Failed: {e}")
 
-                        tg_message = (
-                            f"📩 <b>New Email Alert!</b>\n"
-                            f"📧 <b>Account:</b> {acc['label']} ({acc['user']})\n"
-                            f"👤 <b>From:</b> {sender}\n"
-                            f"📌 <b>Subject:</b> {subject}\n\n"
-                            f"💬 <b>Preview:</b>\n{preview}"
-                            f"{otp_section}"
-                        )
+            mail.logout()
 
-                        markup = types.InlineKeyboardMarkup(row_width=2)
-                        if verify_link:
-                            markup.add(types.InlineKeyboardButton("🔗 Open Verify Link", url=verify_link))
-                        elif all_links:
-                            markup.add(types.InlineKeyboardButton("🌐 Open Main Link", url=all_links[0]))
-                        
-                        markup.add(types.InlineKeyboardButton("🗑️ Delete Mail", callback_data=f"del_{acc['index']}_{uid.decode()}"))
-
-                        # সরাসরি তোর CHAT_ID তে মেসেজ পাঠানো হচ্ছে
-                        try:
-                            bot.send_message(CHAT_ID, tg_message, parse_mode="HTML", reply_markup=markup)
-                            # সফল ডেলিভারির পর মেইলটিকে Seen করা হচ্ছে
-                            mail.uid('store', uid, '+FLAGS', '\\Seen')
-                        except Exception as e:
-                            print(f"[-] Telegram Send Failed: {e}")
-
-                mail.logout()
-
-            except Exception as e:
-                print(f"[-] Error on {acc['user']}: {e}")
-
-        # ৭টি অ্যাকাউন্ট এক চক্কর দেওয়ার পর ১০ সেকেন্ড বিরতি (CPU Throttling বাঁচাবে)
-        time.sleep(10)
+        except Exception as e:
+            print(f"[-] Thread Error on {acc['user']}: {e}")
+        
+        # একটি চক্কর শেষ করে মাত্র ৩ সেকেন্ড বিরতি নেবে (আলাদা থ্রেড হওয়ায় রেন্ডার ক্র্যাশ করবে না)
+        time.sleep(3)
 
 # ===================== WEB SERVER =====================
 class WebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Gmail Monitor Keep-Alive Status: OK")
+        self.wfile.write(b"Fast Gmail Bot Running!")
     def log_message(self, *args):
         pass
 
@@ -262,9 +250,16 @@ def run_web():
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), WebHandler).serve_forever()
 
+# ===================== MAIN RUNNER =====================
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    print("[+] Absolute Secure Monitor Engine Started!")
+    
+    # ৭টি অ্যাকাউন্টের জন্য ৭টি আলাদা সমান্তরাল থ্রেড চালু করা
+    if ACCOUNTS:
+        for account in ACCOUNTS:
+            threading.Thread(target=single_account_worker, args=(account,), daemon=True).start()
+    else:
+        print("[-] No accounts found in Environment Variables!")
+
+    print("[+] Parallel Fast Engine Started!")
     bot.infinity_polling()
-                   
